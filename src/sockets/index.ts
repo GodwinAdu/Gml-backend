@@ -293,34 +293,37 @@ export const initSocket = (server: HttpServer): Server => {
             try {
                 const { name, role, sessionId, location, speed, accuracy, heading } = data
 
-                // Validate input data
+                // Validate input
                 if (!name || typeof name !== "string" || name.trim().length === 0) {
                     socket.emit("error", { message: "Invalid name provided" })
                     return
                 }
 
-                if (!["admin", "supervisor", "worker", "new"].includes(role)) {
+                if (!["admin", "supervisor", "worker"].includes(role)) {
                     socket.emit("error", { message: "Invalid role provided" })
                     return
                 }
-                // Check if user already joined in this session
-                const duplicateUser = Array.from(connectedUsers.values()).find(
-                    (user) => user.name === name.trim() && user.sessionId === sessionId
+
+                const trimmedName = name.trim()
+                const sid = sessionId || "tracking-users"
+
+                // ❗ Prevent duplicate: check if user with same name and session already exists
+                const isAlreadyJoined = Array.from(connectedUsers.values()).some(
+                    user => user.name === trimmedName && user.sessionId === sid
                 )
 
-                if (duplicateUser) {
-                    socket.emit("error", { message: "User with the same name already joined in this session" })
+                if (isAlreadyJoined) {
+                    socket.emit("error", { message: "User already joined the session" })
                     return
                 }
 
-
-                console.log(`🔗 User joining:`, { name: name.trim(), role, sessionId })
+                console.log(`🔗 User joining:`, { name: trimmedName, role, sessionId: sid })
 
                 const userData: User = {
                     id: socket.id,
-                    name: name.trim(),
+                    name: trimmedName,
                     role: role || "worker",
-                    sessionId: sessionId || "tracking-users",
+                    sessionId: sid,
                     joinedAt: getCurrentTimestamp(),
                     lastSeen: getCurrentTimestamp(),
                     status: "online",
@@ -368,6 +371,7 @@ export const initSocket = (server: HttpServer): Server => {
                 socket.emit("error", { message: "Failed to join tracking session", code: "JOIN_ERROR" })
             }
         })
+
 
         // Enhanced location updates with throttling
         let lastLocationUpdate = 0

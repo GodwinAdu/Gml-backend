@@ -299,10 +299,20 @@ export const initSocket = (server: HttpServer): Server => {
                     return
                 }
 
-                if (!["admin", "supervisor", "worker"].includes(role)) {
+                if (!["admin", "supervisor", "worker", "new"].includes(role)) {
                     socket.emit("error", { message: "Invalid role provided" })
                     return
                 }
+                // Check if user already joined in this session
+                const duplicateUser = Array.from(connectedUsers.values()).find(
+                    (user) => user.name === name.trim() && user.sessionId === sessionId
+                )
+
+                if (duplicateUser) {
+                    socket.emit("error", { message: "User with the same name already joined in this session" })
+                    return
+                }
+
 
                 console.log(`🔗 User joining:`, { name: name.trim(), role, sessionId })
 

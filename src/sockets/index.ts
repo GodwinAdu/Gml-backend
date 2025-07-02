@@ -1,62 +1,104 @@
-import { Server as HttpServer } from "http";
-import { Server, Socket } from "socket.io";
-import { log } from "../utils/logger";
+import type { Server as HttpServer } from "http"
+import { Server, type Socket } from "socket.io"
+
+interface User {
+    id: string
+    name: string
+    role: "admin" | "supervisor" | "worker"
+    sessionId: string
+    joinedAt: string
+    lastSeen: string
+    status: "online" | "away" | "offline"
+    location: any
+    accuracy?: number
+    speed?: number
+    heading?: number
+    trail: Array<{
+        latitude: number
+        longitude: number
+        timestamp: string
+    }>
+    isTyping: boolean
+    connectionHealth?: any
+}
+
+interface ConnectionHealth {
+    connectedAt: number
+    lastPing: number
+    pingCount: number
+    reconnectCount: number
+    isHealthy: boolean
+    latency?: number
+}
 
 /**
- * Initializes a Socket.IO server.
+ * Initializes a Socket.IO server with enhanced stability for Render deployment.
  * @param {HttpServer} server - The HTTP server to attach the Socket.IO server to.
  * @returns {Server} The initialized Socket.IO server.
  */
-
-export const initSocket = (server: HttpServer) => {
+export const initSocket = (server: HttpServer): Server => {
     const io = new Server(server, {
         cors: {
             origin: [
                 "http://localhost:3000",
-                "https://carpentary2025.vercel.app", // Add your actual frontend domain
+                "https://carpentary2025.vercel.app",
                 /\.vercel\.app$/,
                 /\.netlify\.app$/,
+                /\.render\.com$/,
             ],
             methods: ["GET", "POST"],
             credentials: true,
         },
-        // Production-optimized transport settings
+        // Enhanced transport settings for Render stability
         transports: ["websocket", "polling"],
         allowEIO3: true,
 
-        // Connection stability settings
-        pingTimeout: 120000, // 2 minutes - increased for unstable connections
+        // Optimized connection settings for cloud deployment
+        pingTimeout: 180000, // 3 minutes - increased for Render
         pingInterval: 25000, // 25 seconds
-        upgradeTimeout: 30000, // 30 seconds for transport upgrade
-        maxHttpBufferSize: 1e6, // 1MB - reduced for better performance
+        upgradeTimeout: 45000, // 45 seconds for slower connections
+        maxHttpBufferSize: 1e6, // 1MB
 
-        // Compression settings
+        // Enhanced compression for better performance
         perMessageDeflate: {
             threshold: 1024,
             concurrencyLimit: 10,
             memLevel: 7,
+            serverMaxWindowBits: 15,
+            clientMaxWindowBits: 15,
         },
 
-        // Connection management
+        // Connection management optimizations
         allowUpgrades: true,
-        cookie: false, // Disable cookies for better performance
+        cookie: false,
 
-        // Heartbeat settings for Render
-    });
-    // Store connected users and their data
-    const connectedUsers = new Map()
-    const trackingSessions = new Map()
-    const typingUsers = new Map()
-    const connectionHealth = new Map() // Track connection health
+        // Additional stability settings
+        serveClient: false,
+        path: "/socket.io/",
+        connectTimeout: 45000,
+
+        // Engine.IO specific settings for Render
+        allowRequest: (req: import("http").IncomingMessage, callback: (err: any, success: boolean) => void) => {
+            // Add custom validation if needed
+            callback(null, true)
+        }
+    })
+
+    // Enhanced data storage with cleanup mechanisms
+    const connectedUsers = new Map<string, User>()
+    const trackingSessions = new Map<string, Set<string>>()
+    const typingUsers = new Map<string, NodeJS.Timeout>()
+    const connectionHealth = new Map<string, ConnectionHealth>()
+    const messageBuffer = new Map<string, any[]>() // Buffer messages for reconnection
 
     // Utility functions
-    const generateUserId = () => Math.random().toString(36).substr(2, 9)
-    const getCurrentTimestamp = () => new Date().toISOString()
+    const generateUserId = (): string => Math.random().toString(36).substr(2, 9)
+    const getCurrentTimestamp = (): string => new Date().toISOString()
 
-    // Connection health monitoring
-    const monitorConnection = (socket: Socket) => {
+    // Enhanced connection health monitoring
+    const monitorConnection = (socket: Socket): void => {
         const connectionId = socket.id
-        const healthData = {
+        const healthData: ConnectionHealth = {
             connectedAt: Date.now(),
             lastPing: Date.now(),
             pingCount: 0,
@@ -66,34 +108,52 @@ export const initSocket = (server: HttpServer) => {
 
         connectionHealth.set(connectionId, healthData)
 
-        // Ping monitoring
+        // Adaptive ping monitoring based on connection quality
+        let pingIntervalTime = 30000 // Start with 30 seconds
+
         const pingInterval = setInterval(() => {
             if (socket.connected) {
                 const startTime = Date.now()
-                socket.emit("ping", { timestamp: startTime })
+                socket.emit("ping", {
+                    timestamp: startTime,
+                    serverLoad: process.cpuUsage(),
+                    memoryUsage: process.memoryUsage().heapUsed,
+                })
 
                 const timeout = setTimeout(() => {
-                    // Mark as unhealthy if no pong received
                     const health = connectionHealth.get(connectionId)
                     if (health) {
                         health.isHealthy = false
+                        health.reconnectCount++
                         connectionHealth.set(connectionId, health)
+
+                        // Increase ping frequency for unhealthy connections
+                        pingIntervalTime = Math.max(15000, pingIntervalTime - 5000)
+                        console.warn(`⚠️ Unhealthy connection detected: ${connectionId}`)
                     }
-                }, 10000) // 10 second timeout
+                }, 15000) // 15 second timeout
 
                 socket.once("pong", (data: any) => {
                     clearTimeout(timeout)
                     const health = connectionHealth.get(connectionId)
                     if (health) {
+                        const latency = Date.now() - startTime
                         health.lastPing = Date.now()
                         health.pingCount++
                         health.isHealthy = true
-                        health.latency = Date.now() - startTime
+                        health.latency = latency
                         connectionHealth.set(connectionId, health)
+
+                        // Adjust ping frequency based on latency
+                        if (latency < 100) {
+                            pingIntervalTime = Math.min(60000, pingIntervalTime + 5000) // Decrease frequency for good connections
+                        } else if (latency > 1000) {
+                            pingIntervalTime = Math.max(15000, pingIntervalTime - 2000) // Increase frequency for slow connections
+                        }
                     }
                 })
             }
-        }, 30000) // Ping every 30 seconds
+        }, pingIntervalTime)
 
         // Cleanup on disconnect
         socket.on("disconnect", () => {
@@ -102,74 +162,153 @@ export const initSocket = (server: HttpServer) => {
         })
     }
 
-    // Graceful shutdown handling
-    const gracefulShutdown = () => {
+    // Enhanced graceful shutdown with connection preservation
+    const gracefulShutdown = (): void => {
         console.log("🔄 Graceful shutdown initiated...")
 
-        // Notify all clients about server shutdown
+        // Save current state for quick recovery
+        const serverState = {
+            users: Array.from(connectedUsers.entries()),
+            sessions: Array.from(trackingSessions.entries()),
+            timestamp: getCurrentTimestamp(),
+        }
+
+        // Notify all clients about server shutdown with recovery info
         io.emit("server-shutdown", {
             message: "Server is restarting, please reconnect in a moment",
             timestamp: getCurrentTimestamp(),
+            recoveryData: serverState,
+            expectedDowntime: 30000, // 30 seconds
         })
 
-        // Close all connections
+        // Gracefully close connections
+        const closeTimeout = setTimeout(() => {
+            console.log("⚠️ Force closing connections...")
+            io.close()
+        }, 5000)
+
         io.close(() => {
-            console.log("✅ All connections closed")
+            clearTimeout(closeTimeout)
+            console.log("✅ All connections closed gracefully")
+
             server.close(() => {
                 console.log("✅ Server closed")
                 process.exit(0)
             })
         })
 
-        // Force exit after 10 seconds
+        // Ultimate force exit
         setTimeout(() => {
             console.log("⚠️ Forcing exit...")
             process.exit(1)
-        }, 10000)
+        }, 15000)
     }
 
-    // Handle process signals
-    process.on("SIGTERM", gracefulShutdown)
-    process.on("SIGINT", gracefulShutdown)
-    process.on("SIGUSR2", gracefulShutdown) // Render uses SIGUSR2
+    // Enhanced process signal handling
+    const signals = ["SIGTERM", "SIGINT", "SIGUSR2", "SIGHUP"]
+    signals.forEach((signal) => {
+        process.on(signal, () => {
+            console.log(`📡 Received ${signal}, initiating graceful shutdown...`)
+            gracefulShutdown()
+        })
+    })
 
-    // Handle uncaught exceptions
+    // Enhanced error handling
     process.on("uncaughtException", (error) => {
         console.error("❌ Uncaught Exception:", error)
-        gracefulShutdown()
+        // Don't immediately shutdown, try to recover
+        setTimeout(() => {
+            if (process.listenerCount("uncaughtException") <= 1) {
+                gracefulShutdown()
+            }
+        }, 1000)
     })
 
     process.on("unhandledRejection", (reason, promise) => {
         console.error("❌ Unhandled Rejection at:", promise, "reason:", reason)
-        gracefulShutdown()
+        // Log but don't shutdown for unhandled rejections
     })
 
-    console.log("🚀 Socket.IO Server starting...")
+    // Memory management and cleanup
+    const performCleanup = (): void => {
+        const now = Date.now()
+        const staleThreshold = 10 * 60 * 1000 // 10 minutes
+        let cleanedCount = 0
 
-    io.on("connection", (socket) => {
-        console.log(`✅ Client connected: ${socket.id}`)
+        // Clean up stale connections
+        connectionHealth.forEach((health, socketId) => {
+            if (now - health.lastPing > staleThreshold) {
+                connectionHealth.delete(socketId)
+                connectedUsers.delete(socketId)
+                typingUsers.delete(socketId)
+                cleanedCount++
+            }
+        })
 
-        // Start connection monitoring
+        // Clean up empty sessions
+        trackingSessions.forEach((users, sessionId) => {
+            if (users.size === 0) {
+                trackingSessions.delete(sessionId)
+            }
+        })
+
+        // Clean up message buffers
+        messageBuffer.forEach((messages, userId) => {
+            if (messages.length > 100) {
+                messageBuffer.set(userId, messages.slice(-50))
+            }
+        })
+
+        if (cleanedCount > 0) {
+            console.log(`🧹 Cleaned up ${cleanedCount} stale connections`)
+        }
+
+        // Force garbage collection if available
+        if (global.gc) {
+            global.gc()
+        }
+    }
+
+    // Run cleanup every 2 minutes
+    setInterval(performCleanup, 120000)
+
+    // Enhanced connection handling
+    io.on("connection", (socket: Socket) => {
+        console.log(`✅ Client connected: ${socket.id} from ${socket.handshake.address}`)
+
+        // Start enhanced connection monitoring
         monitorConnection(socket)
 
-        // Send connection confirmation
+        // Send enhanced connection confirmation
         socket.emit("connection-confirmed", {
             socketId: socket.id,
             timestamp: getCurrentTimestamp(),
             serverTime: Date.now(),
+            serverVersion: "2.0.0",
+            features: ["typing-indicators", "reactions", "presence", "reconnection"],
         })
 
-        // Handle user joining tracking session
+        // Enhanced user joining with validation
         socket.on("join-tracking", (data) => {
             try {
                 const { name, role, sessionId, location, speed, accuracy, heading } = data
 
-                console.log(`🔗 User joining:`, { name, role, sessionId })
+                // Validate input data
+                if (!name || typeof name !== "string" || name.trim().length === 0) {
+                    socket.emit("error", { message: "Invalid name provided" })
+                    return
+                }
 
-                // Create user data
-                const userData = {
+                if (!["admin", "supervisor", "worker"].includes(role)) {
+                    socket.emit("error", { message: "Invalid role provided" })
+                    return
+                }
+
+                console.log(`🔗 User joining:`, { name: name.trim(), role, sessionId })
+
+                const userData: User = {
                     id: socket.id,
-                    name: name || `User ${socket.id.substr(0, 6)}`,
+                    name: name.trim(),
                     role: role || "worker",
                     sessionId: sessionId || "tracking-users",
                     joinedAt: getCurrentTimestamp(),
@@ -187,6 +326,12 @@ export const initSocket = (server: HttpServer) => {
                 // Store user data
                 connectedUsers.set(socket.id, userData)
 
+                // Manage session tracking
+                if (!trackingSessions.has(userData.sessionId)) {
+                    trackingSessions.set(userData.sessionId, new Set())
+                }
+                trackingSessions.get(userData.sessionId)!.add(socket.id)
+
                 // Join the tracking room
                 socket.join(`tracking-${userData.sessionId}`)
 
@@ -197,26 +342,58 @@ export const initSocket = (server: HttpServer) => {
                 const roomUsers = Array.from(connectedUsers.values()).filter((user) => user.sessionId === userData.sessionId)
                 socket.emit("users-list", roomUsers)
 
+                // Send buffered messages if any
+                const bufferedMessages = messageBuffer.get(socket.id) || []
+                if (bufferedMessages.length > 0) {
+                    socket.emit("buffered-messages", bufferedMessages)
+                    messageBuffer.delete(socket.id)
+                }
+
                 // Send updated user count to all users in room
                 io.to(`tracking-${userData.sessionId}`).emit("user-count", roomUsers.length)
 
                 console.log(`👤 ${userData.name} joined tracking session: ${userData.sessionId}`)
             } catch (error) {
                 console.error("❌ Error in join-tracking:", error)
-                socket.emit("error", { message: "Failed to join tracking session" })
+                socket.emit("error", { message: "Failed to join tracking session", code: "JOIN_ERROR" })
             }
         })
 
-        // Handle location updates with error handling
+        // Enhanced location updates with throttling
+        let lastLocationUpdate = 0
+        const locationUpdateThrottle = 1000 // 1 second minimum between updates
+
         socket.on("location-update", (locationData) => {
             try {
+                const now = Date.now()
+                if (now - lastLocationUpdate < locationUpdateThrottle) {
+                    return // Throttle location updates
+                }
+                lastLocationUpdate = now
+
                 const user = connectedUsers.get(socket.id)
                 if (!user) {
-                    socket.emit("error", { message: "User not found" })
+                    socket.emit("error", { message: "User not found", code: "USER_NOT_FOUND" })
                     return
                 }
 
-                // Add to trail
+                // Validate location data
+                if (locationData.location) {
+                    const { latitude, longitude } = locationData.location
+                    if (
+                        typeof latitude !== "number" ||
+                        typeof longitude !== "number" ||
+                        latitude < -90 ||
+                        latitude > 90 ||
+                        longitude < -180 ||
+                        longitude > 180
+                    ) {
+                        socket.emit("error", { message: "Invalid location coordinates", code: "INVALID_LOCATION" })
+                        return
+                    }
+                }
+
+                // Add to trail with optimization
                 if (locationData.location) {
                     const trailPoint = {
                         latitude: locationData.location.latitude,
@@ -226,14 +403,14 @@ export const initSocket = (server: HttpServer) => {
 
                     user.trail.push(trailPoint)
 
-                    // Keep only last 50 trail points to reduce memory usage
-                    if (user.trail.length > 50) {
-                        user.trail = user.trail.slice(-50)
+                    // Keep only last 30 trail points to reduce memory usage
+                    if (user.trail.length > 30) {
+                        user.trail = user.trail.slice(-30)
                     }
                 }
 
                 // Update user location data
-                const updatedUser = {
+                const updatedUser: User = {
                     ...user,
                     location: locationData.location,
                     accuracy: locationData.accuracy,
@@ -247,24 +424,26 @@ export const initSocket = (server: HttpServer) => {
                 connectedUsers.set(socket.id, updatedUser)
 
                 // Broadcast location update to others in the same session
-                socket.to(`tracking-${user.sessionId}`).emit("location-update", {
+                const updatePayload = {
                     userId: socket.id,
                     location: locationData.location,
                     accuracy: locationData.accuracy,
                     speed: locationData.speed,
                     heading: locationData.heading,
                     timestamp: getCurrentTimestamp(),
-                })
+                }
+
+                socket.to(`tracking-${user.sessionId}`).emit("location-update", updatePayload)
 
                 // Update user in users list for all users in session
                 io.to(`tracking-${user.sessionId}`).emit("user-updated", updatedUser)
             } catch (error) {
                 console.error("❌ Error in location-update:", error)
-                socket.emit("error", { message: "Failed to update location" })
+                socket.emit("error", { message: "Failed to update location", code: "LOCATION_UPDATE_ERROR" })
             }
         })
 
-        // Handle typing indicators with debouncing
+        // Enhanced typing indicators with improved debouncing
         socket.on("typing-start", () => {
             try {
                 const user = connectedUsers.get(socket.id)
@@ -284,7 +463,7 @@ export const initSocket = (server: HttpServer) => {
 
                 // Clear any existing typing timeout for this user
                 if (typingUsers.has(socket.id)) {
-                    clearTimeout(typingUsers.get(socket.id))
+                    clearTimeout(typingUsers.get(socket.id)!)
                 }
 
                 // Set timeout to automatically stop typing after 3 seconds
@@ -315,17 +494,14 @@ export const initSocket = (server: HttpServer) => {
                 const user = connectedUsers.get(socket.id)
                 if (!user) return
 
-                // Update user typing status
                 user.isTyping = false
                 connectedUsers.set(socket.id, user)
 
-                // Clear timeout
                 if (typingUsers.has(socket.id)) {
-                    clearTimeout(typingUsers.get(socket.id))
+                    clearTimeout(typingUsers.get(socket.id)!)
                     typingUsers.delete(socket.id)
                 }
 
-                // Broadcast typing status to others in the session
                 socket.to(`tracking-${user.sessionId}`).emit("user-typing", {
                     userId: socket.id,
                     userName: user.name,
@@ -337,12 +513,33 @@ export const initSocket = (server: HttpServer) => {
             }
         })
 
-        // Handle chat messages
+        // Enhanced message handling with validation and rate limiting
+        let lastMessageTime = 0
+        const messageRateLimit = 500 // 500ms between messages
+
         socket.on("send-message", (messageData) => {
             try {
+                const now = Date.now()
+                if (now - lastMessageTime < messageRateLimit) {
+                    socket.emit("error", { message: "Message rate limit exceeded", code: "RATE_LIMIT" })
+                    return
+                }
+                lastMessageTime = now
+
                 const user = connectedUsers.get(socket.id)
                 if (!user) {
-                    socket.emit("error", { message: "User not found" })
+                    socket.emit("error", { message: "User not found", code: "USER_NOT_FOUND" })
+                    return
+                }
+
+                // Validate message
+                if (
+                    !messageData.message ||
+                    typeof messageData.message !== "string" ||
+                    messageData.message.trim().length === 0 ||
+                    messageData.message.length > 1000
+                ) {
+                    socket.emit("error", { message: "Invalid message content", code: "INVALID_MESSAGE" })
                     return
                 }
 
@@ -350,9 +547,8 @@ export const initSocket = (server: HttpServer) => {
                 user.isTyping = false
                 connectedUsers.set(socket.id, user)
 
-                // Clear typing timeout
                 if (typingUsers.has(socket.id)) {
-                    clearTimeout(typingUsers.get(socket.id))
+                    clearTimeout(typingUsers.get(socket.id)!)
                     typingUsers.delete(socket.id)
                 }
 
@@ -369,7 +565,7 @@ export const initSocket = (server: HttpServer) => {
                     userId: socket.id,
                     userName: user.name,
                     userRole: user.role,
-                    message: messageData.message,
+                    message: messageData.message.trim(),
                     timestamp: getCurrentTimestamp(),
                     location: user.location,
                     messageType: messageData.messageType || "text",
@@ -377,23 +573,42 @@ export const initSocket = (server: HttpServer) => {
                     reactions: {},
                 }
 
+                // Buffer message for offline users
+                const sessionUsers = trackingSessions.get(user.sessionId) || new Set()
+                sessionUsers.forEach((userId) => {
+                    if (!connectedUsers.has(userId)) {
+                        if (!messageBuffer.has(userId)) {
+                            messageBuffer.set(userId, [])
+                        }
+                        messageBuffer.get(userId)!.push(message)
+                    }
+                })
+
                 // Broadcast message to all users in the session
                 io.to(`tracking-${user.sessionId}`).emit("new-message", message)
 
-                console.log(`💬 Message from ${user.name}: ${messageData.message}`)
+                console.log(
+                    `💬 Message from ${user.name}: ${messageData.message.substring(0, 50)}${messageData.message.length > 50 ? "..." : ""}`,
+                )
             } catch (error) {
                 console.error("❌ Error in send-message:", error)
-                socket.emit("error", { message: "Failed to send message" })
+                socket.emit("error", { message: "Failed to send message", code: "MESSAGE_ERROR" })
             }
         })
 
-        // Handle message reactions
+        // Enhanced message reactions
         socket.on("message-reaction", (reactionData) => {
             try {
                 const user = connectedUsers.get(socket.id)
                 if (!user) return
 
                 const { messageId, emoji, action } = reactionData
+
+                // Validate reaction data
+                if (!messageId || !emoji || !["add", "remove"].includes(action)) {
+                    socket.emit("error", { message: "Invalid reaction data", code: "INVALID_REACTION" })
+                    return
+                }
 
                 // Broadcast reaction to all users in the session
                 io.to(`tracking-${user.sessionId}`).emit("message-reaction-update", {
@@ -409,13 +624,18 @@ export const initSocket = (server: HttpServer) => {
             }
         })
 
-        // Handle status updates
+        // Enhanced status and presence updates
         socket.on("status-update", (status) => {
             try {
                 const user = connectedUsers.get(socket.id)
                 if (!user) return
 
-                const updatedUser = {
+                if (!["online", "away", "offline"].includes(status)) {
+                    socket.emit("error", { message: "Invalid status", code: "INVALID_STATUS" })
+                    return
+                }
+
+                const updatedUser: User = {
                     ...user,
                     status,
                     lastSeen: getCurrentTimestamp(),
@@ -423,21 +643,18 @@ export const initSocket = (server: HttpServer) => {
 
                 connectedUsers.set(socket.id, updatedUser)
 
-                // Broadcast status update
                 socket.to(`tracking-${user.sessionId}`).emit("user-status-changed", {
                     userId: socket.id,
                     status,
                     timestamp: getCurrentTimestamp(),
                 })
 
-                // Update user in users list
                 io.to(`tracking-${user.sessionId}`).emit("user-updated", updatedUser)
             } catch (error) {
                 console.error("❌ Error in status-update:", error)
             }
         })
 
-        // Handle presence updates
         socket.on("presence-update", (presenceData) => {
             try {
                 const user = connectedUsers.get(socket.id)
@@ -445,20 +662,17 @@ export const initSocket = (server: HttpServer) => {
 
                 const { isActive, lastActivity } = presenceData
 
-                const updatedUser = {
+                const updatedUser: User = {
                     ...user,
-                    isActive,
-                    lastActivity: lastActivity || getCurrentTimestamp(),
                     lastSeen: getCurrentTimestamp(),
                 }
 
                 connectedUsers.set(socket.id, updatedUser)
 
-                // Broadcast presence update
                 socket.to(`tracking-${user.sessionId}`).emit("user-presence-changed", {
                     userId: socket.id,
-                    isActive,
-                    lastActivity: updatedUser.lastActivity,
+                    isActive: Boolean(isActive),
+                    lastActivity: lastActivity || getCurrentTimestamp(),
                     timestamp: getCurrentTimestamp(),
                 })
             } catch (error) {
@@ -469,32 +683,46 @@ export const initSocket = (server: HttpServer) => {
         // Enhanced ping/pong handling
         socket.on("ping", (data) => {
             try {
+                const health = connectionHealth.get(socket.id)
                 socket.emit("pong", {
                     timestamp: getCurrentTimestamp(),
                     serverTime: Date.now(),
                     clientTime: data?.timestamp,
+                    connectionHealth: health
+                        ? {
+                            latency: health.latency,
+                            pingCount: health.pingCount,
+                            isHealthy: health.isHealthy,
+                        }
+                        : null,
                 })
             } catch (error) {
                 console.error("❌ Error in ping:", error)
             }
         })
 
-        // Handle client reconnection
+        // Enhanced reconnection handling
         socket.on("reconnect-request", (data) => {
             try {
                 console.log(`🔄 Reconnection request from ${socket.id}`)
+
+                const user = connectedUsers.get(socket.id)
+                const health = connectionHealth.get(socket.id)
 
                 socket.emit("reconnect-response", {
                     success: true,
                     timestamp: getCurrentTimestamp(),
                     serverTime: Date.now(),
+                    userData: user,
+                    connectionHealth: health,
+                    bufferedMessages: messageBuffer.get(socket.id) || [],
                 })
             } catch (error) {
                 console.error("❌ Error in reconnect-request:", error)
             }
         })
 
-        // Handle disconnection
+        // Enhanced disconnection handling
         socket.on("disconnect", (reason) => {
             try {
                 console.log(`❌ Client disconnected: ${socket.id}, reason: ${reason}`)
@@ -503,8 +731,17 @@ export const initSocket = (server: HttpServer) => {
                 if (user) {
                     // Clear typing timeout
                     if (typingUsers.has(socket.id)) {
-                        clearTimeout(typingUsers.get(socket.id))
+                        clearTimeout(typingUsers.get(socket.id)!)
                         typingUsers.delete(socket.id)
+                    }
+
+                    // Remove from session tracking
+                    const sessionUsers = trackingSessions.get(user.sessionId)
+                    if (sessionUsers) {
+                        sessionUsers.delete(socket.id)
+                        if (sessionUsers.size === 0) {
+                            trackingSessions.delete(user.sessionId)
+                        }
                     }
 
                     // Notify others in the room
@@ -512,6 +749,7 @@ export const initSocket = (server: HttpServer) => {
                         userId: socket.id,
                         userName: user.name,
                         timestamp: getCurrentTimestamp(),
+                        reason: reason,
                     })
 
                     // Update user count
@@ -523,39 +761,57 @@ export const initSocket = (server: HttpServer) => {
 
                     console.log(`👋 ${user.name} left session: ${user.sessionId}`)
 
-                    // Remove user from connected users
-                    connectedUsers.delete(socket.id)
+                    // Keep user data for potential reconnection (for 5 minutes)
+                    setTimeout(
+                        () => {
+                            connectedUsers.delete(socket.id)
+                            messageBuffer.delete(socket.id)
+                        },
+                        5 * 60 * 1000,
+                    )
                 }
 
-                // Cleanup connection health
                 connectionHealth.delete(socket.id)
             } catch (error) {
                 console.error("❌ Error in disconnect:", error)
             }
         })
 
-        // Handle connection errors
+        // Enhanced error handling
         socket.on("error", (error) => {
             console.error(`❌ Socket error for ${socket.id}:`, error)
-        })
 
-    });
-
-    // Periodic cleanup of stale data
-    setInterval(() => {
-        const now = Date.now()
-        const staleThreshold = 5 * 60 * 1000 // 5 minutes
-
-        // Clean up stale connections
-        connectionHealth.forEach((health, socketId) => {
-            if (now - health.lastPing > staleThreshold) {
-                console.log(`🧹 Cleaning up stale connection: ${socketId}`)
-                connectionHealth.delete(socketId)
-                connectedUsers.delete(socketId)
-                typingUsers.delete(socketId)
+            // Try to recover from certain errors
+            if (error.message.includes("transport")) {
+                socket.emit("connection-recovery", {
+                    message: "Transport error detected, attempting recovery",
+                    timestamp: getCurrentTimestamp(),
+                })
             }
         })
-    }, 60000) // Run every minute
+    })
 
-    return io;
-};
+    // Server health monitoring
+    const logServerHealth = () => {
+        const memUsage = process.memoryUsage()
+        const cpuUsage = process.cpuUsage()
+
+        console.log(
+            `💓 Server Health - Users: ${connectedUsers.size}, Sessions: ${trackingSessions.size}, Memory: ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`,
+        )
+
+        // Alert if memory usage is high
+        if (memUsage.heapUsed > 500 * 1024 * 1024) {
+            // 500MB
+            console.warn(`⚠️ High memory usage: ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`)
+            performCleanup()
+        }
+    }
+
+    // Log server health every 30 seconds
+    setInterval(logServerHealth, 30000)
+
+    console.log("🚀 Enhanced Socket.IO Server initialized with stability improvements")
+
+    return io
+}

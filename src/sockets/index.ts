@@ -54,7 +54,7 @@ export const initSocket = (server: HttpServer) => {
     const getCurrentTimestamp = () => new Date().toISOString()
 
     // Connection health monitoring
-    const monitorConnection = (socket) => {
+    const monitorConnection = (socket: Socket) => {
         const connectionId = socket.id
         const healthData = {
             connectedAt: Date.now(),
@@ -81,7 +81,7 @@ export const initSocket = (server: HttpServer) => {
                     }
                 }, 10000) // 10 second timeout
 
-                socket.once("pong", (data) => {
+                socket.once("pong", (data: any) => {
                     clearTimeout(timeout)
                     const health = connectionHealth.get(connectionId)
                     if (health) {

@@ -293,7 +293,6 @@ export const initSocket = (server: HttpServer): Server => {
             try {
                 const { name, role, sessionId, location, speed, accuracy, heading } = data
 
-                // Validate input
                 if (!name || typeof name !== "string" || name.trim().length === 0) {
                     socket.emit("error", { message: "Invalid name provided" })
                     return
@@ -306,18 +305,16 @@ export const initSocket = (server: HttpServer): Server => {
 
                 const trimmedName = name.trim()
                 const sid = sessionId || "tracking-users"
+                const uniqueUserKey = `${trimmedName}_${sid}` // persistent identity across refresh
 
-                // ❗ Prevent duplicate: check if user with same name and session already exists
-                const isAlreadyJoined = Array.from(connectedUsers.values()).some(
-                    user => user.name === trimmedName && user.sessionId === sid
-                )
-
-                if (isAlreadyJoined) {
-                    socket.emit("error", { message: "User already joined the session" })
-                    return
+                // 🧠 Remove any existing user with same unique key (e.g., after refresh)
+                for (const [socketId, user] of connectedUsers.entries()) {
+                    if (`${user.name}_${user.sessionId}` === uniqueUserKey) {
+                        connectedUsers.delete(socketId)
+                        trackingSessions.get(user.sessionId)?.delete(socketId)
+                        io.to(`tracking-${user.sessionId}`).emit("user-left", user)
+                    }
                 }
-
-                console.log(`🔗 User joining:`, { name: trimmedName, role, sessionId: sid })
 
                 const userData: User = {
                     id: socket.id,
@@ -336,41 +333,34 @@ export const initSocket = (server: HttpServer): Server => {
                     connectionHealth: connectionHealth.get(socket.id),
                 }
 
-                // Store user data
                 connectedUsers.set(socket.id, userData)
 
-                // Manage session tracking
-                if (!trackingSessions.has(userData.sessionId)) {
-                    trackingSessions.set(userData.sessionId, new Set())
+                if (!trackingSessions.has(sid)) {
+                    trackingSessions.set(sid, new Set())
                 }
-                trackingSessions.get(userData.sessionId)!.add(socket.id)
+                trackingSessions.get(sid)!.add(socket.id)
 
-                // Join the tracking room
-                socket.join(`tracking-${userData.sessionId}`)
+                socket.join(`tracking-${sid}`)
+                socket.to(`tracking-${sid}`).emit("user-joined", userData)
 
-                // Notify others in the room
-                socket.to(`tracking-${userData.sessionId}`).emit("user-joined", userData)
-
-                // Send current users list to the new user
-                const roomUsers = Array.from(connectedUsers.values()).filter((user) => user.sessionId === userData.sessionId)
+                const roomUsers = Array.from(connectedUsers.values()).filter(u => u.sessionId === sid)
                 socket.emit("users-list", roomUsers)
 
-                // Send buffered messages if any
                 const bufferedMessages = messageBuffer.get(socket.id) || []
                 if (bufferedMessages.length > 0) {
                     socket.emit("buffered-messages", bufferedMessages)
                     messageBuffer.delete(socket.id)
                 }
 
-                // Send updated user count to all users in room
-                io.to(`tracking-${userData.sessionId}`).emit("user-count", roomUsers.length)
+                io.to(`tracking-${sid}`).emit("user-count", roomUsers.length)
 
-                console.log(`👤 ${userData.name} joined tracking session: ${userData.sessionId}`)
+                console.log(`👤 ${trimmedName} rejoined tracking session: ${sid}`)
             } catch (error) {
                 console.error("❌ Error in join-tracking:", error)
                 socket.emit("error", { message: "Failed to join tracking session", code: "JOIN_ERROR" })
             }
         })
+
 
 
         // Enhanced location updates with throttling

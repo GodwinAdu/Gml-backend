@@ -299,7 +299,7 @@ export const initSocket = (server: HttpServer): Server => {
                     return
                 }
 
-                if (!["admin", "supervisor", "worker"].includes(role)) {
+                if (!["admin", "supervisor", "worker", "new"].includes(role)) {
                     socket.emit("error", { message: "Invalid role provided" })
                     return
                 }

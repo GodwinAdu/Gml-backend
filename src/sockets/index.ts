@@ -288,6 +288,23 @@ export const initSocket = (server: HttpServer): Server => {
             features: ["typing-indicators", "reactions", "presence", "reconnection"],
         })
 
+        // Handle users list requests
+        socket.on("users-list", () => {
+            try {
+                const user = connectedUsers.get(socket.id)
+                if (!user) {
+                    socket.emit("error", { message: "User not found", code: "USER_NOT_FOUND" })
+                    return
+                }
+
+                const roomUsers = Array.from(connectedUsers.values()).filter(u => u.sessionId === user.sessionId)
+                socket.emit("users-list", roomUsers)
+            } catch (error) {
+                console.error("❌ Error in users-list:", error)
+                socket.emit("error", { message: "Failed to get users list", code: "USERS_LIST_ERROR" })
+            }
+        })
+
         // Enhanced user joining with validation
         socket.on("join-tracking", (data) => {
             try {

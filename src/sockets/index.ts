@@ -4,7 +4,7 @@ import { Server, type Socket } from "socket.io"
 interface User {
     id: string
     name: string
-    role: "admin" | "supervisor" | "worker"
+    role: "admin" | "moderator" | "worker" | "new"
     sessionId: string
     joinedAt: string
     lastSeen: string
@@ -296,9 +296,9 @@ export const initSocket = (server: HttpServer): Server => {
                 if (!name || typeof name !== "string" || name.trim().length === 0) {
                     socket.emit("error", { message: "Invalid name provided" })
                     return
-                }
+                };
 
-                if (!["admin", "supervisor", "worker", "new"].includes(role)) {
+                if (!["admin", "moderator", "worker", "new"].includes(role)) {
                     socket.emit("error", { message: "Invalid role provided" })
                     return
                 }
@@ -319,7 +319,7 @@ export const initSocket = (server: HttpServer): Server => {
                 const userData: User = {
                     id: socket.id,
                     name: trimmedName,
-                    role: role || "worker",
+                    role: role,
                     sessionId: sid,
                     joinedAt: getCurrentTimestamp(),
                     lastSeen: getCurrentTimestamp(),
